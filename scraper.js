@@ -1,5 +1,4 @@
 import { createClient } from '@supabase/supabase-js';
-import * as cheerio from 'cheerio';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -7,112 +6,115 @@ const ASSOCIATE_TAG = 'kodeal-20';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const CATEGORIES = {
-  'Beauty & Personal Care': '뷰티',
-  'Clothing': '패션',
-  'Shoes': '패션',
-  'Grocery': '마트',
-  'Food': '마트',
-  'Electronics': '테크',
-  'Home & Kitchen': '리빙',
-  'Tools': '리빙',
-};
+// Slickdeals RSS 피드 목록 (카테고리별)
+const RSS_FEEDS = [
+  { url: 'https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&deal_type=0&forumid[]=9&forumid[]=44&forumid[]=25&rss=1', cat: '뷰티' },
+  { url: 'https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&deal_type=0&forumid[]=30&forumid[]=47&rss=1', cat: '패션' },
+  { url: 'https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&deal_type=0&forumid[]=55&forumid[]=15&rss=1', cat: '마트' },
+  { url: 'https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&deal_type=0&forumid[]=4&forumid[]=22&rss=1', cat: '테크' },
+  { url: 'https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&deal_type=0&forumid[]=53&forumid[]=19&rss=1', cat: '리빙' },
+];
 
-function getCategory(breadcrumb) {
-  for (const [key, val] of Object.entries(CATEGORIES)) {
-    if (breadcrumb?.includes(key)) return val;
-  }
-  return '특가';
+// 할인율 파싱
+function parseDiscount(text) {
+  const match = text?.match(/(\d+)%\s*off/i);
+  return match ? parseInt(match[1]) : 0;
 }
 
-async function fetchDeals() {
-  console.log('🔍 아마존 딜 페이지 스크래핑 시작...');
+// 가격 파싱
+function parsePrice(text) {
+  const match = text?.match(/\$(\d+(?:\.\d+)?)/);
+  return match ? parseFloat(match[1]) : null;
+}
 
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  };
-
-  try {
-    const res = await fetch('https://www.amazon.com/deals?deals-widget=%7B%22version%22%3A1%2C%22viewIndex%22%3A0%2C%22presetId%22%3A%22deals-collection-all-deals%22%2C%22sorting%22%3A%22BY_SCORE%22%7D', { headers });
-    
-    if (!res.ok) {
-      console.log(`❌ HTTP 오류: ${res.status}`);
-      return [];
+// 아마존 링크면 어필리에이트 태그 추가
+function makeAffiliateLink(url) {
+  if (!url) return url;
+  if (url.includes('amazon.com')) {
+    const asinMatch = url.match(/\/dp\/([A-Z0-9]{10})/);
+    if (asinMatch) {
+      return `https://www.amazon.com/dp/${asinMatch[1]}?tag=${ASSOCIATE_TAG}`;
     }
+    try {
+      const u = new URL(url);
+      u.searchParams.set('tag', ASSOCIATE_TAG);
+      return u.toString();
+    } catch { return url; }
+  }
+  return url;
+}
 
-    const html = await res.text();
-    const $ = cheerio.load(html);
+// RSS 파싱
+async function fetchRSS(feedUrl, cat) {
+  try {
+    const res = await fetch(feedUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!res.ok) return [];
+
+    const xml = await res.text();
     const deals = [];
 
-    // 딜 카드 파싱
-    $('[data-testid="deal-card"], .DealCard, [class*="dealCard"]').each((i, el) => {
-      try {
-        const title = $(el).find('[class*="title"], h2, h3').first().text().trim();
-        const discountText = $(el).find('[class*="discount"], [class*="savings"], [class*="badge"]').first().text().trim();
-        const priceText = $(el).find('[class*="price"], .a-price').first().text().trim();
-        const originalPriceText = $(el).find('[class*="original"], .a-text-strike, s').first().text().trim();
-        const link = $(el).find('a').first().attr('href');
-        const img = $(el).find('img').first().attr('src');
+    // item 태그 파싱
+    const items = xml.match(/<item>([\s\S]*?)<\/item>/g) || [];
 
-        if (!title || !link) return;
+    for (const item of items) {
+      const title = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/)?.[1]
+        || item.match(/<title>(.*?)<\/title>/)?.[1] || '';
+      
+      const description = item.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/)?.[1]
+        || item.match(/<description>(.*?)<\/description>/)?.[1] || '';
+      
+      const link = item.match(/<link>(.*?)<\/link>/)?.[1]
+        || item.match(/<guid>(.*?)<\/guid>/)?.[1] || '';
 
-        // 할인율 파싱
-        const discountMatch = discountText.match(/(\d+)%/);
-        const discount = discountMatch ? parseInt(discountMatch[1]) : 0;
+      if (!title || !link) continue;
 
-        if (discount < 30) return;
+      const fullText = title + ' ' + description;
+      const discount = parseDiscount(fullText);
+      const price = parsePrice(fullText);
 
-        // 가격 파싱
-        const priceMatch = priceText.match(/[\d.]+/);
-        const price = priceMatch ? parseFloat(priceMatch[0]) : null;
+      // 30% 미만 필터링
+      if (discount > 0 && discount < 30) continue;
 
-        const originalMatch = originalPriceText.match(/[\d.]+/);
-        const original = originalMatch ? parseFloat(originalMatch[0]) : null;
+      // 이미지 추출
+      const imgMatch = description.match(/<img[^>]+src="([^"]+)"/);
+      const img = imgMatch ? imgMatch[1] : null;
 
-        if (!price) return;
+      // 원가 추출
+      const prices = fullText.match(/\$(\d+(?:\.\d+)?)/g);
+      const original = prices && prices.length > 1 
+        ? parseFloat(prices[prices.length - 1].replace('$', ''))
+        : null;
 
-        // 링크 정리
-        const asinMatch = link.match(/\/dp\/([A-Z0-9]{10})/);
-        const cleanLink = asinMatch 
-          ? `https://www.amazon.com/dp/${asinMatch[1]}?tag=${ASSOCIATE_TAG}`
-          : `https://www.amazon.com${link}&tag=${ASSOCIATE_TAG}`;
+      deals.push({
+        title: title.slice(0, 100),
+        cat,
+        store: link.includes('amazon.com') ? 'Amazon' : 'Slickdeals',
+        price: price || 0,
+        original,
+        link: makeAffiliateLink(link),
+        img,
+      });
+    }
 
-        deals.push({
-          title: title.slice(0, 100),
-          cat: '특가',
-          store: 'Amazon',
-          price,
-          original,
-          link: cleanLink,
-          img: img || null,
-        });
-
-      } catch (e) {
-        // 파싱 오류 무시
-      }
-    });
-
-    console.log(`✅ ${deals.length}개 딜 파싱됨`);
     return deals;
-
   } catch (err) {
-    console.log('❌ 스크래핑 실패:', err.message);
+    console.log(`❌ RSS 오류 (${cat}):`, err.message);
     return [];
   }
 }
 
 async function saveDeal(deal) {
-  // 이미 같은 링크가 있는지 확인
+  // 이미 같은 제목이 있는지 확인
   const { data: existing } = await sb
     .from('deals')
     .select('id')
-    .eq('link', deal.link)
-    .single();
+    .eq('title', deal.title)
+    .maybeSingle();
 
   if (existing) {
-    console.log(`⏭️ 이미 존재: ${deal.title.slice(0, 30)}...`);
+    console.log(`⏭️ 중복: ${deal.title.slice(0, 40)}...`);
     return false;
   }
 
@@ -128,21 +130,25 @@ async function saveDeal(deal) {
 
 async function main() {
   console.log('🚀 KoDeal 자동화 시작:', new Date().toLocaleString('ko-KR'));
-  
-  const deals = await fetchDeals();
-  
-  if (deals.length === 0) {
-    console.log('😅 가져온 딜이 없어요. 아마존이 막았을 수 있어요.');
-    return;
+
+  let allDeals = [];
+
+  for (const feed of RSS_FEEDS) {
+    console.log(`📡 ${feed.cat} 피드 가져오는 중...`);
+    const deals = await fetchRSS(feed.url, feed.cat);
+    console.log(`  → ${deals.length}개 딜 발견`);
+    allDeals = allDeals.concat(deals);
   }
 
+  console.log(`\n📦 총 ${allDeals.length}개 딜 처리 시작`);
+
   let saved = 0;
-  for (const deal of deals) {
+  for (const deal of allDeals) {
     const ok = await saveDeal(deal);
     if (ok) saved++;
   }
 
-  console.log(`🎉 완료! ${saved}개 새 딜 등록됨`);
+  console.log(`\n🎉 완료! ${saved}개 새 딜 등록됨`);
 }
 
 main();
